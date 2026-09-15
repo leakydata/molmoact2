@@ -1,0 +1,69 @@
+# Two SO-101 followers sharing one scene camera, each with its own wrist cam.
+#
+# MolmoAct2-SO100_101 is a single-arm policy: each arm is queried separately
+# (its own state, wrist image and prompt) and the arms do NOT coordinate or
+# avoid each other. Give them separate workspaces. Each control cycle makes
+# one server call per arm, so each arm gets fresh chunks half as often.
+#
+# Plug the arms in one at a time and run `lerobot-find-port` to tell which
+# ttyACM is which. Better, use the stable /dev/serial/by-id/... paths.
+
+server: http://127.0.0.1:8101
+prompt: pick up the block and put it in the bowl   # default for both arms
+
+exec_hz: 30
+num_steps: 10
+ensemble_m: 0.5
+smooth_alpha: 1.0
+warmup_predictions: 2
+hold_torque_on_exit: false
+
+cameras:
+  scene:
+    type: realsense
+    serial: "935322072168"
+    width: 640
+    height: 480
+    fps: 30
+  # A second scene camera per arm is also fine: define it here and point
+  # that arm's `scene_camera` at it.
+  # scene_webcam:
+  #   type: opencv
+  #   device: /dev/v4l/by-id/usb-046d_C922_Pro_Stream_Webcam_33DAD1BF-video-index0
+  left_wrist:
+    type: opencv
+    device: /dev/v4l/by-id/REPLACE-ME-LEFT-video-index0
+    width: 640
+    height: 480
+    fps: 30
+    flip: "180"
+    white_balance_temperature: 4600
+  right_wrist:
+    type: opencv
+    device: /dev/v4l/by-id/REPLACE-ME-RIGHT-video-index0
+    width: 640
+    height: 480
+    fps: 30
+    flip: "180"
+    white_balance_temperature: 4600
+
+arms:
+  - name: left
+    port: /dev/ttyACM0
+    calibration_id: left_follower
+    scene_camera: scene
+    wrist_camera: left_wrist
+    joint_signs:   [1, -1, 1, 1, 1, 1]
+    joint_offsets: [0, 90, 90, 0, 0, 0]
+    max_step_deg: 5.0
+    max_chunk_jump_deg: 30.0
+
+  - name: right
+    port: /dev/ttyACM1
+    calibration_id: right_follower     # calibrate it: lerobot-calibrate ... --robot.id=right_follower
+    scene_camera: scene
+    wrist_camera: right_wrist
+    joint_signs:   [1, -1, 1, 1, 1, 1]
+    joint_offsets: [0, 90, 90, 0, 0, 0]
+    max_step_deg: 5.0
+    max_chunk_jump_deg: 30.0

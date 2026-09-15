@@ -8,6 +8,8 @@ This is the MolmoAct2 release repo. The tracked code under this working director
 
 - `examples/droid/host_server_droid.py` — FastAPI inference server for `allenai/MolmoAct2-DROID` (2 cams, 8-D state, `norm_tag="franka_droid"`, default port 8000).
 - `examples/yam/host_server_yam.py` — same shape, but for `allenai/MolmoAct2-BimanualYAM` (3 cams `[top, left, right]`, 14-D state, `norm_tag="yam_dual_molmoact2"`, default port 8202).
+- `examples/so101/host_server_so101.py` — same shape for `allenai/MolmoAct2-SO100_101` (2 cams `scene_cam`/`wrist_cam`, 6-D state in LeRobot v2.1 degrees, `norm_tag="so100_so101_molmoact2"`, default port 8101). Also wraps the upstream single-entry action CUDA-graph cache in an LRU (`--cuda-graph-cache`) so alternating prompt lengths don't re-capture on every call.
+- `examples/so101/so101_client.py` (+ `so101_hardware.py`, `so101_runtime.py`, `configs/*.yaml`) — robot-side client for one or two SO-101 arms via LeRobot. Has its **own uv project** in `examples/so101/pyproject.toml` (LeRobot needs `huggingface-hub>=1.0`, which conflicts with the server's transformers 4.57); run it with `uv run` from that directory, never from the repo-root env.
 
 Untracked but kept locally:
 
@@ -33,6 +35,8 @@ uv run hf download allenai/MolmoAct2-DROID                                 # pre
 uv run hf download allenai/MolmoAct2-BimanualYAM                           # pre-cache YAM   (~21 GB)
 curl http://<host>:8000/act                                                # DROID health
 curl http://<host>:8202/act                                                # YAM   health
+./run_so101.sh                                                             # SO-101 server, port 8101 (bf16 + CUDA graphs)
+(cd examples/so101 && uv run so101_client.py run --config configs/single_arm.yaml --prompt "..." --dry-run)
 ```
 
 Useful server flags: `--dtype {bfloat16,float16,float32}` (default bf16; fp32 needs ~96 GB VRAM), `--device cuda:0`, `--cuda-graph` (~2× faster action expert, +~2 GB VRAM, not safe under concurrent calls), `--no-warmup`.

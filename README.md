@@ -121,6 +121,8 @@ MolmoAct2 supports out-of-the-box deployment on three robot embodiments:
 
 For the best performance, we recommend using an **SO-100 with the standard wrist configuration** and a **third-person camera**. Here is an open implementation by Irene Grace. [Code](https://github.com/irenegracekp/molmoact2-so101)
 
+A server/client version of it, supporting one or two arms and RealSense or plain webcams, lives in [`examples/so101/`](examples/so101/README.md).
+
 ### Bimanual YAM Setup
 
 For the best performance, please build your Bimanual YAM setup following the reference design below:
@@ -145,6 +147,7 @@ This repository ships two FastAPI inference servers under `examples/`, one per f
 | --- | --- | --- | --- | --- |
 | [`examples/droid/host_server_droid.py`](examples/droid/host_server_droid.py) | [`allenai/MolmoAct2-DROID`](https://huggingface.co/allenai/MolmoAct2-DROID) | `8000` | `(8,) = [q1..q7, gripper]` | `external`, `wrist` |
 | [`examples/yam/host_server_yam.py`](examples/yam/host_server_yam.py) | [`allenai/MolmoAct2-BimanualYAM`](https://huggingface.co/allenai/MolmoAct2-BimanualYAM) | `8202` | `(14,)` (per-arm 7-D × 2 arms) | `top`, `left`, `right` (order matters) |
+| [`examples/so101/host_server_so101.py`](examples/so101/host_server_so101.py) | [`allenai/MolmoAct2-SO100_101`](https://huggingface.co/allenai/MolmoAct2-SO100_101) | `8101` | `(6,)` (one arm per request) | `scene`, `wrist` |
 
 ### 1. Install [uv](https://docs.astral.sh/uv/)
 

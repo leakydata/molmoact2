@@ -1,0 +1,32 @@
+[project]
+name = "molmoact2-so101-client"
+version = "0.1.0"
+description = "Robot-side client driving SO-100/101 arms from the MolmoAct2 SO-101 policy server"
+requires-python = ">=3.12,<3.13"
+# Kept separate from the repo-root server environment: LeRobot needs
+# huggingface-hub>=1.0 while the server's transformers 4.57 needs <1.0.
+dependencies = [
+    "lerobot[feetech]>=0.5.1,<0.7",
+    # Direct deps only so the CPU-index source below applies to them.
+    "torch>=2.7,<2.12",
+    "torchvision>=0.22,<0.27",
+    "pyrealsense2>=2.55.1.6486,<2.57",
+    "opencv-python-headless>=4.9,<4.14",
+    "numpy>=2.0,<2.3",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "json-numpy>=2.1.0",
+]
+
+[tool.uv]
+package = false
+
+# The client never runs the model; CPU wheels keep LeRobot's torch dep small.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
