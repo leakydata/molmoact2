@@ -165,6 +165,11 @@ class RuntimeConfig:
     # to the newest.
     execution_mode: str = "ensemble"
     commit_steps: int = 15
+    # The policy is stochastic: in a hard scene most samples are "approach with
+    # open jaws" and only a few actually close the gripper. >1 draws that many
+    # plans per cycle and keeps the one that commits most to a grasp. This picks
+    # among the policy's own proposals; it does not author any motion.
+    best_of: int = 1
     save_frames_dir: str | None = None
     dry_run: bool = False
 
@@ -175,6 +180,12 @@ def _fmt(v: np.ndarray) -> str:
 
 def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def _grip_travel(actions_model: np.ndarray) -> float:
+    """How much a plan opens/closes the gripper. ~0 means 'approach, never grasp'."""
+    g = np.asarray(actions_model, dtype=np.float32)[:, 5]
+    return float(g.max() - g.min())
 
 
 class _InferenceProducer(threading.Thread):
@@ -220,9 +231,17 @@ class _InferenceProducer(threading.Thread):
             cv2.imwrite(os.path.join(cfg.save_frames_dir, f"{ts:013d}_{arm.name}_wrist.jpg"), wrist)
 
         t_obs = time.monotonic()
+        scene_rgb, wrist_rgb = _bgr_to_rgb(scene), _bgr_to_rgb(wrist)
         actions_model, dt_ms = self.client.act(
-            _bgr_to_rgb(scene), _bgr_to_rgb(wrist), arm.prompt, state_model, cfg.num_steps
+            scene_rgb, wrist_rgb, arm.prompt, state_model, cfg.num_steps
         )
+        for _ in range(max(0, cfg.best_of - 1)):
+            cand, dt_c = self.client.act(
+                scene_rgb, wrist_rgb, arm.prompt, state_model, cfg.num_steps
+            )
+            dt_ms += dt_c
+            if _grip_travel(cand) > _grip_travel(actions_model):
+                actions_model = cand
         actions = np.clip(arm.to_arm_frame(actions_model), arm.joint_min, arm.joint_max)
 
         self._preds[arm.name] += 1

@@ -130,17 +130,56 @@ Stop with Ctrl+C. By default torque is released on exit and the arm drops, so ke
 | `joint_min` / `joint_max` | none | Hard clamps in LeRobot degrees. |
 | (internal) | 4° | Rate limit per servo write in the bus thread. |
 
+`best_of: N` (or `--best-of N`) draws N plans per cycle and keeps the one with
+the most gripper travel. It selects among the policy's own proposals rather than
+authoring motion, which helps when most samples are "approach with open jaws",
+but it multiplies inference latency (N × ~200 ms) and a chunk only covers 1 s —
+past N≈3 the chunk expires before it can be executed. Default 1.
+
 ## Making the policy actually move (lessons from real runs)
 
 Zero-shot MolmoAct2 is picky about its *inputs*, not about this client. On a real
 SO-101 the same checkpoint swings between "reaches out, grasps, places the object"
 and "plans 2° and parks". What decided it, in order of impact:
 
+0. **The scene camera must look *down* at the table.** This dominates everything
+   else below. Measured on one rig by replaying saved frames through the server
+   30× per condition and counting how many plans contain any gripper travel:
+
+   | scene camera | P(plan closes the gripper) |
+   | --- | --- |
+   | elevated, angled down at the tabletop | **50–75%** |
+   | same rig, camera knocked down to table height, looking across | **0–3%** |
+
+   The edge-on view is not recoverable in software: cropping to the table,
+   sending the scene twice, the wrist twice, brightening, CLAHE, every prompt
+   wording, and flow-matching steps 4/10/20/32 all stayed at 0–4%. Raising the
+   camera fixed it. If the policy "goes dumb" after someone bumps a camera,
+   check the camera geometry before touching anything else.
+
+   A dark or colour-cast scene image costs almost as much. Pin the RealSense's
+   white balance and exposure (`white_balance:`, `exposure:`, `gain:` in the
+   camera config) — its auto WB swings hard blue under mixed desk light, and
+   the policy sees a blue room as a different scene entirely.
+
+   Careful with this measurement: reach magnitude alone is *not* task behaviour
+   (the checkpoint always drifts back toward its training range), and gripper
+   travel is only meaningful once the gripper is near the object — a plan that
+   keeps the jaws open while still far away is correct. Score P(grasp) over many
+   samples, never a mean over a handful: the policy is stochastic and a single
+   lucky draw looks like a 27° "win" that vanishes on the next frame.
+
 1. **Start from a mid-range pose, never the folded rest pose.** In the fold, the
    elbow/shoulder sit past the checkpoint's `q99`, and every plan is just a small
    pull back toward the training range — no task behaviour at all. Pass
    `--start-pose 3.1,124.5,122.8,57.8,-11.1,4.9` (the training median, model frame)
    and the same scene suddenly produces 20–70° reaches with the gripper opening.
+   Sweeping candidate poses offline (`probe`-style, no hardware) found
+   `-20,124.5,110,40,-11.1,4.9` ~27% better again on one rig. Two traps when
+   scoring poses: a pose outside the median scores high merely because the plan
+   drives *back* toward the training range (no gripper motion — not task
+   behaviour), and starting with the gripper already open removes the grasp
+   entirely (gripper motion collapses from ~16° to ~1°).
 2. **Re-home whenever it stalls.** After finishing (or wandering into a pose it
    dislikes) the policy parks and plans nothing. `--rehome-after SECONDS` +
    `--stall-deg DEG` ramp back to the start pose — the run then cycles

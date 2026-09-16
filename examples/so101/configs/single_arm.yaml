@@ -8,7 +8,7 @@ prompt: pick up the orange collar
 
 exec_hz: 30              # rate joint targets are sent to the servos
 num_steps: 10            # flow-matching solver steps
-execution_mode: commit   # commit = follow each chunk for commit_steps (reaches get executed); ensemble = blend chunks
+execution_mode: commit # commit = follow each chunk for commit_steps (reaches get executed); ensemble = blend chunks
 commit_steps: 30         # full chunk (1 s); the checkpoint metadata says n_action_steps=30
 ensemble_m: 0.5          # temporal-ensembling decay (1/s); lower = smoother, laggier
 smooth_alpha: 1.0        # extra EMA on the output (1.0 = off; try 0.6 if jittery)
@@ -26,12 +26,17 @@ cameras:
     fps: 30
     white_balance_temperature: 4600
   realsense:
-    # Previous scene camera; point an arm's `scene_camera` here to switch back.
+    # Mounted higher than the C922 and angled down, so it sees the tabletop
+    # rather than the room behind it. Offline scoring (2026-09-15): the C922's
+    # current edge-on view plans a real grasp in 0% of samples, this one in ~7%.
     type: realsense
     serial: "935322072168"
     width: 640
     height: 480
     fps: 30
+    white_balance: 4600  # auto WB swings hard blue on this D435; pin it
+    exposure: 300        # ~10 ms; auto under-exposes this room and dark scenes kill grasping
+    gain: 1.15
   wrist:
     type: opencv
     # The standard SO-101 wrist cam. Replace with its by-id path once plugged in.
@@ -49,21 +54,21 @@ arms:
   - name: left
     port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE6082317-if00
     calibration_id: left_follower      # ~/.cache/huggingface/lerobot/calibration/robots/so_follower/<id>.json
-    scene_camera: scene
+    scene_camera: realsense
     wrist_camera: wrist
     scene_only: false                  # true = send the scene image twice, ignore the wrist cam
 
     # LeRobot v3.0 calibration -> MolmoAct2 (v2.1) joint convention.
     # model = signs * arm + offsets. Verify with `so101_client.py check`.
     joint_signs:   [1, -1, 1, 1, 1, 1]
-    # LeRobot v3.0 -> v2.1 plus two per-arm wrist corrections for THIS calibration:
-    #   wrist_flex -23, wrist_roll +78 (gripper reads -82 when square). With the
-    #   plain defaults the model retracted to rest; with these it reached and grasped.
-    joint_offsets: [0, 90, 90, -23, 78, 0]
+    # Stock LeRobot v3.0 -> v2.1 conversion. After the 2026-09-15 recalibration
+    # this arm needs no per-joint corrections: at rest every joint is within a
+    # few degrees of the checkpoint's reference pose.
+    joint_offsets: [0, 90, 90, 0, 0, 0]
     prompt: pick up the orange collar
 
     # Safety. Limits are in the arm's own (LeRobot) degrees; null = no limit.
     max_step_deg: 15.0                 # per 1/exec_hz tick, whole-vector scaled
-    max_chunk_jump_deg: 60.0           # joint conventions are validated; let big reaches through
+    max_chunk_jump_deg: 200.0          # effectively off: let the policy command whatever it plans
     joint_min: [null, null, null, null, null, null]
     joint_max: [null, null, null, null, null, null]

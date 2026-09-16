@@ -399,7 +399,7 @@ def cmd_probe(args: argparse.Namespace) -> None:
 
 def _rehome_supervisor(arms: list[ArmRuntime], arm_cfgs: list[dict[str, Any]],
                        pose: str, after_s: float, health: dict[str, Any],
-                       stall_deg: float = 6.0) -> None:
+                       stall_deg: float = 6.0, every_s: float = 0.0) -> None:
     """Re-home an arm the policy has parked outside its training state range.
 
     From the folded rest pose the checkpoint plans nothing but a small pull back
@@ -407,15 +407,23 @@ def _rehome_supervisor(arms: list[ArmRuntime], arm_cfgs: list[dict[str, Any]],
     """
     q01 = np.asarray(health.get("state_q01") or TRAIN_STATE_Q01, np.float32)
     q99 = np.asarray(health.get("state_q99") or TRAIN_STATE_Q99, np.float32)
-    margin = 5.0
+    # No slack: the checkpoint only knows states inside its training range, and
+    # at the boundary it stops planning grasps (gripper deltas collapse to ~0).
+    margin = 0.0
     out_since: dict[str, float] = {}
+    last_home = {a.name: time.monotonic() for a in arms}
     while True:
         time.sleep(1.0)
         for arm, a in zip(arms, arm_cfgs):
             if time.monotonic() < arm.hold_until:
                 continue
+            # Periodic reset: an attempt takes ~20-40 s, and the policy is most
+            # capable right after landing in an in-distribution pose.
+            due = every_s > 0 and time.monotonic() - last_home[arm.name] >= every_s
+            # Treat "within 2 deg of a limit" as out too; the arm creeps there.
+            edge = 2.0
             state = arm.to_model_frame(arm.follower.get_state())
-            out = bool(np.any(state < q01 - margin) or np.any(state > q99 + margin))
+            out = bool(np.any(state < q01 + edge) or np.any(state > q99 - edge))
             # A policy that has stalled plans almost nothing for many cycles in
             # a row; re-homing gives it a fresh pose it knows what to do from.
             # Median over the recent plans: one stray big plan should not reset
@@ -423,16 +431,17 @@ def _rehome_supervisor(arms: list[ArmRuntime], arm_cfgs: list[dict[str, Any]],
             peaks = list(arm.recent_peaks)
             stalled = (arm.last_plan_t > 0 and time.monotonic() - arm.last_plan_t < 5.0
                        and len(peaks) >= 10 and float(np.median(peaks[-10:])) < stall_deg)
-            out = out or stalled
+            out = out or stalled or due
             if not out:
                 out_since.pop(arm.name, None)
                 continue
             t0 = out_since.setdefault(arm.name, time.monotonic())
             if time.monotonic() - t0 < after_s:
                 continue
-            bad = [i for i, v in enumerate(state) if v < q01[i] - margin or v > q99[i] + margin]
-            why = (f"plans stalled under {stall_deg:.0f} deg"
-                   if not bad else f"outside training range on {[MOTOR_NAMES[i] for i in bad]}")
+            bad = [i for i, v in enumerate(state) if v < q01[i] + edge or v > q99[i] - edge]
+            why = ("periodic reset" if due and not bad and not stalled
+                   else f"plans stalled under {stall_deg:.0f} deg" if not bad
+                   else f"outside training range on {[MOTOR_NAMES[i] for i in bad]}")
             print(f"[{arm.name}] {why} for {after_s:.0f}s; re-homing to the start pose")
             arm.hold_until = time.monotonic() + 60.0
             arm.status = "re-homing to start pose"
@@ -442,6 +451,7 @@ def _rehome_supervisor(arms: list[ArmRuntime], arm_cfgs: list[dict[str, Any]],
             except Exception as e:  # noqa: BLE001
                 print(f"[{arm.name}] re-home failed: {e}")
             out_since.pop(arm.name, None)
+            last_home[arm.name] = time.monotonic()
             arm.ring.clear()
             arm.recent_peaks.clear()
             arm.hold_until = time.monotonic() + 0.5
@@ -508,6 +518,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         max_latency_skip_s=float(cfg.get("max_latency_skip_s", 0.3)),
         execution_mode=str(cfg.get("execution_mode", "ensemble")),
         commit_steps=int(cfg.get("commit_steps", 15)),
+        best_of=int(getattr(args, "best_of", None) or cfg.get("best_of", 1)),
         save_frames_dir=args.save_frames_dir,
         dry_run=args.dry_run,
     )
@@ -563,7 +574,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         if args.start_pose and args.rehome_after > 0:
             threading.Thread(target=_rehome_supervisor, daemon=True, name="rehome",
                              args=(arms, cfg["arms"], args.start_pose, args.rehome_after,
-                                   client.health(), args.stall_deg)).start()
+                                   client.health(), args.stall_deg, args.rehome_every)).start()
         if args.show:
             PreviewServer(cams, port=args.preview_port,
                           status_fn=lambda: [f"{a.name}: {a.status}" for a in arms])
@@ -631,6 +642,9 @@ def main() -> None:
     r.add_argument("--arm-prompt", action="append", default=[], metavar="NAME=TEXT",
                    help="per-arm instruction (repeatable); wins over --prompt")
     r.add_argument("--num-steps", type=int, help="flow-matching solver steps (default 10)")
+    r.add_argument("--best-of", type=int,
+                   help="draw N plans per cycle, keep the one that commits most to a grasp "
+                        "(default 1; costs N x inference latency)")
     r.add_argument("--dry-run", action="store_true", help="query the model but never move the arms")
     r.add_argument("--simulate", action="store_true", help="no serial I/O; fake arms that track targets")
     r.add_argument("--show", action="store_true",
@@ -641,6 +655,9 @@ def main() -> None:
                    help="ramp to this model-frame pose 'a,b,c,d,e,f' before the policy starts "
                         "(the folded rest pose is outside the training range)")
     r.add_argument("--prompt-file", help="re-read the prompt from this file whenever it changes")
+    r.add_argument("--rehome-every", type=float, default=0.0, metavar="SECONDS",
+                   help="with --start-pose: also reset on this fixed cycle, so every attempt "
+                        "starts from a pose the policy handles well (0 = only on stall)")
     r.add_argument("--stall-deg", type=float, default=6.0, metavar="DEG",
                    help="plans smaller than this count as stalled (see --rehome-after)")
     r.add_argument("--rehome-after", type=float, default=15.0, metavar="SECONDS",

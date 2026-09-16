@@ -190,11 +190,14 @@ class FollowerArm:
 class _ThreadedCamera:
     """Base class: a grab thread keeps `self._frame` fresh (BGR uint8)."""
 
-    def __init__(self, name: str, flip: str | None):
+    def __init__(self, name: str, flip: str | None, gain: float = 1.0):
         if flip not in _FLIP_CODES:
             raise ValueError(f"camera {name!r}: flip must be one of v/h/180/none, got {flip!r}")
         self.name = name
         self.flip_code = _FLIP_CODES[flip]
+        # Software brightness. The RealSense under-exposes this dim room, and a
+        # dark scene image measurably kills grasp planning (see README).
+        self.gain = float(gain)
         self._frame: np.ndarray | None = None
         self._frame_t = 0.0
         self._lock = threading.Lock()
@@ -221,6 +224,8 @@ class _ThreadedCamera:
                 continue
             if self.flip_code is not None:
                 img = cv2.flip(img, self.flip_code)
+            if self.gain != 1.0:
+                img = cv2.convertScaleAbs(img, alpha=self.gain, beta=0)
             with self._lock:
                 self._frame = img
                 self._frame_t = time.monotonic()
@@ -259,8 +264,8 @@ class OpenCVCamera(_ThreadedCamera):
     def __init__(self, name: str, device: str | int, width: int = 640, height: int = 480,
                  fps: int = 30, flip: str | None = None, fourcc: str | None = "MJPG",
                  white_balance_temperature: int | None = None,
-                 v4l2_controls: dict[str, Any] | None = None):
-        super().__init__(name, flip)
+                 v4l2_controls: dict[str, Any] | None = None, gain: float = 1.0):
+        super().__init__(name, flip, gain)
         if isinstance(device, str) and device.isdigit():
             device = int(device)
         dev_path = f"/dev/video{device}" if isinstance(device, int) else os.path.realpath(device)
@@ -309,8 +314,10 @@ class RealSenseCamera(_ThreadedCamera):
     MolmoAct2-SO100_101 has depth reasoning disabled."""
 
     def __init__(self, name: str, serial: str | None = None, width: int = 640,
-                 height: int = 480, fps: int = 30, flip: str | None = None):
-        super().__init__(name, flip)
+                 height: int = 480, fps: int = 30, flip: str | None = None,
+                 gain: float = 1.0, white_balance: int | None = None,
+                 exposure: int | None = None):
+        super().__init__(name, flip, gain)
         import pyrealsense2 as rs
 
         devices = list(rs.context().query_devices())
@@ -336,8 +343,20 @@ class RealSenseCamera(_ThreadedCamera):
         cfg = rs.config()
         cfg.enable_device(chosen)
         cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
-        pipeline.start(cfg)
+        profile = pipeline.start(cfg)
         self._pipeline = pipeline
+        # Auto WB on a D435 under mixed desk light swings hard blue, which the
+        # policy sees as a completely different scene. Pin it when asked.
+        sensor = profile.get_device().first_color_sensor()
+        for opt, val, auto in ((rs.option.white_balance, white_balance, rs.option.enable_auto_white_balance),
+                               (rs.option.exposure, exposure, rs.option.enable_auto_exposure)):
+            if val is None:
+                continue
+            try:
+                sensor.set_option(auto, 0)
+                sensor.set_option(opt, float(val))
+            except Exception as e:  # noqa: BLE001
+                print(f"[cam {name}] could not set {opt}: {e}")
         print(f"[cam {name}] RealSense {device.get_info(rs.camera_info.name)} "
               f"serial {chosen} (USB {usb}) at {width}x{height}@{fps}")
         self._thread.start()

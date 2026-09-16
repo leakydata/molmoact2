@@ -33,15 +33,8 @@ setInterval(() => { if (!img.complete) return; }, 5000);
 
 
 class PreviewServer:
-    # Where objects sat in the scene view during the grasps that worked: the
-    # open desk in front of the arm, not at its base or the frame edge. Drawn
-    # on the preview as a placement guide (fractions of width/height).
-    PLACE_ZONE = (0.34, 0.60, 0.78, 0.90)
-
     def __init__(self, cameras: dict, port: int = 8102, host: str = "127.0.0.1",
-                 status_fn: Callable[[], list[str]] | None = None, fps: float = 10.0,
-                 zone_camera: str = "scene"):
-        self.zone_camera = zone_camera
+                 status_fn: Callable[[], list[str]] | None = None, fps: float = 10.0):
         self.cameras = cameras
         self.status_fn = status_fn or (lambda: [])
         self.period = 1.0 / fps
@@ -86,13 +79,6 @@ class PreviewServer:
             img = cam.read()
             img = np.zeros((360, 480, 3), np.uint8) if img is None else img
             img = cv2.resize(img, (int(img.shape[1] * 360 / img.shape[0]), 360))
-            if name == self.zone_camera:
-                h, w = img.shape[:2]
-                x0, y0, x1, y1 = self.PLACE_ZONE
-                p0, p1 = (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h))
-                cv2.rectangle(img, p0, p1, (80, 220, 80), 2)
-                cv2.putText(img, "place object here", (p0[0] + 4, p1[1] - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 220, 80), 1)
             cv2.putText(img, name, (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4)
             cv2.putText(img, name, (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             tiles.append(img)
