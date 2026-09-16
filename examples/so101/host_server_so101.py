@@ -25,6 +25,7 @@ Wire protocol:
               "timestamp":   float (optional),
               "num_steps":   int   (optional, default 10),
               "enable_cuda_graph": bool (optional),
+              "seed":        int   (optional, flow-matching noise seed),
             }
         response body (json_numpy):
             {"actions": ndarray(N, 6) float32, "dt_ms": float}
@@ -256,6 +257,7 @@ class Policy:
         state: np.ndarray,
         num_steps: int = DEFAULT_NUM_STEPS,
         enable_cuda_graph: bool = False,
+        seed: int | None = None,
     ) -> np.ndarray:
         images = [_to_pil(scene_cam), _to_pil(wrist_cam)]
         state_f32 = np.asarray(state, dtype=np.float32).reshape(-1)
@@ -276,6 +278,8 @@ class Policy:
                 num_steps=num_steps,
                 normalize_language=True,
                 enable_cuda_graph=enable_cuda_graph,
+                generator=None if seed is None
+                else torch.Generator(device=self.device).manual_seed(int(seed)),
             )
         raw = out.actions
         if torch.is_tensor(raw):
@@ -336,6 +340,7 @@ def build_app(policy: Policy) -> FastAPI:
             return _error_response(400, f"missing required field: {e}")
 
         num_steps = int(payload.get("num_steps", DEFAULT_NUM_STEPS))
+        seed = payload.get("seed")
         enable_cuda_graph = bool(
             payload.get("enable_cuda_graph", policy.default_cuda_graph)
         )
@@ -349,6 +354,7 @@ def build_app(policy: Policy) -> FastAPI:
                 state=state,
                 num_steps=num_steps,
                 enable_cuda_graph=enable_cuda_graph,
+                seed=None if seed is None else int(seed),
             )
         except Exception as e:  # noqa: BLE001
             log.exception("inference failed")

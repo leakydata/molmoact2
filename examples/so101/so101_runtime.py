@@ -54,8 +54,9 @@ class PolicyClient:
         return r.json()
 
     def act(self, scene_rgb: np.ndarray, wrist_rgb: np.ndarray, instruction: str,
-            state: np.ndarray, num_steps: int) -> tuple[np.ndarray, float]:
+            state: np.ndarray, num_steps: int, seed: int | None = None) -> tuple[np.ndarray, float]:
         body = json_numpy.dumps({
+            **({} if seed is None else {"seed": int(seed)}),
             "scene_cam": np.ascontiguousarray(scene_rgb, dtype=np.uint8),
             "wrist_cam": np.ascontiguousarray(wrist_rgb, dtype=np.uint8),
             "instruction": instruction,
@@ -100,6 +101,11 @@ class ChunkRingBuffer:
             self._entries.append((chunk, t_start, chunk_id))
             return chunk_id
 
+    def clear(self) -> None:
+        """Drop queued plans — they were computed for a pose we have left."""
+        with self._lock:
+            self._entries.clear()
+
     def snapshot(self) -> list:
         with self._lock:
             return list(self._entries)
@@ -123,6 +129,19 @@ class ArmRuntime:
     # exactly like this, so it is the main guard against slamming the arm.
     max_chunk_jump_deg: float = 30.0
     scene_only: bool = False
+    # If set, the prompt is re-read from this file whenever it changes, so a
+    # task can be staged ("pick up X" -> "put X in Y") without reconnecting.
+    prompt_file: str | None = None
+    # While time.monotonic() < hold_until the consumer stops issuing targets,
+    # so a supervisor can re-home the arm without fighting the policy.
+    hold_until: float = 0.0
+    # Largest motion the newest plan asks for, and when it landed; a supervisor
+    # uses this to spot the policy stalling in a pose it does not like.
+    last_plan_peak: float = 0.0
+    last_plan_t: float = 0.0
+    recent_peaks: collections.deque = field(default_factory=lambda: collections.deque(maxlen=20))
+    _prompt_mtime: float = 0.0
+    status: str = "starting"          # one-line summary for the preview
     ring: ChunkRingBuffer = field(default_factory=ChunkRingBuffer)
 
     def to_model_frame(self, state_arm: np.ndarray) -> np.ndarray:
@@ -141,6 +160,11 @@ class RuntimeConfig:
     actions_per_chunk: int | None = None
     warmup_predictions: int = 1
     max_latency_skip_s: float = 0.3
+    # "ensemble": blend all live chunks (smooth, but rare reaching plans get
+    # averaged away). "commit": follow one chunk for commit_steps, then jump
+    # to the newest.
+    execution_mode: str = "ensemble"
+    commit_steps: int = 15
     save_frames_dir: str | None = None
     dry_run: bool = False
 
@@ -168,6 +192,17 @@ class _InferenceProducer(threading.Thread):
 
     def _step(self, arm: ArmRuntime) -> None:
         cfg = self.cfg
+        if arm.prompt_file:
+            try:
+                mtime = os.path.getmtime(arm.prompt_file)
+                if mtime != arm._prompt_mtime:
+                    text = open(arm.prompt_file, encoding="utf-8").read().strip()
+                    arm._prompt_mtime = mtime
+                    if text and text != arm.prompt:
+                        arm.prompt = text
+                        print(f"[{arm.name}] prompt -> {text!r}")
+            except OSError:
+                pass
         scene = arm.scene_cam.read()
         wrist = scene if arm.scene_only else arm.wrist_cam.read()
         if scene is None or wrist is None:
@@ -193,11 +228,13 @@ class _InferenceProducer(threading.Thread):
         self._preds[arm.name] += 1
         n = self._preds[arm.name]
         if n <= cfg.warmup_predictions:
+            arm.status = f"warm-up {n}/{cfg.warmup_predictions} ({dt_ms:.0f} ms)"
             print(f"[{arm.name}] warm-up prediction {n}/{cfg.warmup_predictions} ({dt_ms:.0f} ms)")
             return
 
         jump = np.abs(actions[0] - state_arm)
         if float(jump.max()) > arm.max_chunk_jump_deg:
+            arm.status = f"DROPPED chunk: {jump.max():.0f} deg jump on joint {int(jump.argmax())}"
             print(
                 f"[{arm.name}] DROPPED chunk: first action is {jump.max():.0f} deg away from the "
                 f"current pose (joint {int(jump.argmax())}, limit {arm.max_chunk_jump_deg:.0f}).\n"
@@ -213,9 +250,14 @@ class _InferenceProducer(threading.Thread):
         # than the chunk (30 steps = 1 s) aligning strictly to t_obs would
         # expire it on arrival, so skip at most `max_latency_skip_s` of it.
         t_start = max(t_obs, time.monotonic() - cfg.max_latency_skip_s)
+        arm.last_plan_peak = float(np.abs(actions - state_arm).max())
+        arm.last_plan_t = time.monotonic()
+        arm.recent_peaks.append(arm.last_plan_peak)
         chunk_id = arm.ring.add(actions, t_start)
+        arm.status = (f"{'DRY RUN  ' if cfg.dry_run else ''}chunk {chunk_id}  {dt_ms:.0f} ms  "
+                      f"plan end-state {_fmt(actions[-1] - state_arm)}  |  {arm.prompt}")
         print(f"[{arm.name}] {dt_ms:4.0f} ms  chunk {chunk_id}  "
-              f"a0-state={_fmt(actions[0] - state_arm)}")
+              f"a0-state={_fmt(actions[0] - state_arm)}  end-state={_fmt(actions[-1] - state_arm)}")
 
     def run(self) -> None:
         while not self._stop_event.is_set():
@@ -246,17 +288,34 @@ class _ExecutionConsumer(threading.Thread):
         last_sent: np.ndarray | None = None
         holding = False
         next_tick = time.monotonic()
+        current = None  # (chunk, t_start, chunk_id) followed in "commit" mode
         while not self._stop_event.is_set():
             now = time.monotonic()
+            if now < arm.hold_until:
+                next_tick = now + interval
+                time.sleep(interval)
+                continue
+            entries = arm.ring.snapshot()
             active, ages = [], []
-            for chunk, t_obs, _ in arm.ring.snapshot():
-                n = chunk.shape[0]
-                if cfg.actions_per_chunk is not None:
-                    n = min(n, cfg.actions_per_chunk)
-                step = int((now - t_obs) * ACTION_FPS)
-                if 0 <= step < n:
-                    active.append(chunk[step])
-                    ages.append(now - t_obs)
+            if cfg.execution_mode == "commit":
+                # Follow one chunk for `commit_steps` before switching to the
+                # newest, so a single reaching plan isn't averaged away.
+                if entries and (current is None
+                                or int((now - current[1]) * ACTION_FPS) >= cfg.commit_steps):
+                    current = entries[-1]
+                if current is not None:
+                    step = int((now - current[1]) * ACTION_FPS)
+                    if 0 <= step < current[0].shape[0]:
+                        active, ages = [current[0][step]], [0.0]
+            else:
+                for chunk, t_obs, _ in entries:
+                    n = chunk.shape[0]
+                    if cfg.actions_per_chunk is not None:
+                        n = min(n, cfg.actions_per_chunk)
+                    step = int((now - t_obs) * ACTION_FPS)
+                    if 0 <= step < n:
+                        active.append(chunk[step])
+                        ages.append(now - t_obs)
 
             if active:
                 holding = False

@@ -16,9 +16,10 @@ They use two separate environments because LeRobot needs `huggingface-hub>=1.0` 
 | File | What |
 | --- | --- |
 | `host_server_so101.py` | FastAPI server. 2 cameras (`scene_cam`, `wrist_cam`), state `(6,)`, `norm_tag="so100_so101_molmoact2"`, port 8101. |
-| `so101_client.py` | `cameras` / `check` / `run` subcommands. |
+| `so101_client.py` | `cameras` / `check` / `probe` / `selftest` / `demo` / `run` subcommands. |
 | `so101_hardware.py` | Threaded LeRobot arm driver, OpenCV + RealSense cameras. |
-| `so101_runtime.py` | HTTP client, async producer, per-arm temporal-ensembling consumers. |
+| `so101_runtime.py` | HTTP client, async producer, per-arm consumers (`ensemble` or full-chunk `commit` execution). |
+| `so101_preview.py` | Browser camera view + status at `http://127.0.0.1:8102/` (`--show`); LeRobot pins headless OpenCV, so `cv2.imshow` is not available. |
 | `configs/single_arm.yaml`, `configs/two_arms.yaml` | Hardware wiring and safety limits. |
 
 ## Hardware
@@ -39,10 +40,13 @@ uv run hf download allenai/MolmoAct2-SO100_101      # ~21 GB
 curl http://127.0.0.1:8101/act                     # health, includes training state ranges
 ```
 
-On a machine with several GPUs, pin the card by PCI order. CUDA's default numbering is fastest-first, which differs from `nvidia-smi`:
+On a machine with several GPUs, pin the card **by UUID** — CUDA's default numbering
+is fastest-first, `nvidia-smi` numbers by PCI order, and a shell may already export
+`CUDA_VISIBLE_DEVICES`, so an index can silently select the wrong card:
 
 ```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 ./run_so101.sh
+nvidia-smi -L                                   # GPU 1: NVIDIA GeForce RTX 4090 (UUID: GPU-...)
+SO101_GPU=GPU-<uuid> ./run_so101.sh             # run_so101.sh pins this for you
 ```
 
 Measured on an RTX 4090 with bf16:
@@ -59,7 +63,7 @@ Upstream caches only one action-expert CUDA graph, and the graph is keyed on the
 
 ```bash
 cd examples/so101
-uv sync          # Python 3.12, lerobot[feetech] 0.6.x, pyrealsense2, CPU-only torch
+uv sync          # Python 3.12, lerobot[feetech] 0.6.x, pyrealsense2, CUDA torch
 ```
 
 Everything below runs from `examples/so101/`.
@@ -121,10 +125,44 @@ Stop with Ctrl+C. By default torque is released on exit and the arm drops, so ke
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `max_chunk_jump_deg` | 30 | Drops a chunk if its first action is further than this from the current pose. A wrong joint convention trips this before the arm moves. |
-| `max_step_deg` | 5 | Largest joint change per control tick (30 Hz ⇒ ≤150°/s); the whole vector is scaled. |
+| `max_chunk_jump_deg` | 60 | Drops a chunk if its first action is further than this from the current pose. A wrong joint convention trips this before the arm moves; start low (30) until `check` looks right. |
+| `max_step_deg` | 15 | Largest joint change per control tick (30 Hz ⇒ ≤450°/s); the whole vector is scaled. |
 | `joint_min` / `joint_max` | none | Hard clamps in LeRobot degrees. |
 | (internal) | 4° | Rate limit per servo write in the bus thread. |
+
+## Making the policy actually move (lessons from real runs)
+
+Zero-shot MolmoAct2 is picky about its *inputs*, not about this client. On a real
+SO-101 the same checkpoint swings between "reaches out, grasps, places the object"
+and "plans 2° and parks". What decided it, in order of impact:
+
+1. **Start from a mid-range pose, never the folded rest pose.** In the fold, the
+   elbow/shoulder sit past the checkpoint's `q99`, and every plan is just a small
+   pull back toward the training range — no task behaviour at all. Pass
+   `--start-pose 3.1,124.5,122.8,57.8,-11.1,4.9` (the training median, model frame)
+   and the same scene suddenly produces 20–70° reaches with the gripper opening.
+2. **Re-home whenever it stalls.** After finishing (or wandering into a pose it
+   dislikes) the policy parks and plans nothing. `--rehome-after SECONDS` +
+   `--stall-deg DEG` ramp back to the start pose — the run then cycles
+   "reset → attempt → reset" instead of freezing. Queued chunks are dropped on
+   re-home; they were planned for the pose being left.
+3. **Prompt wording matters more than expected.** Short, concrete, and naming an
+   object that is actually visible: `pick up the marker and put it in the mug`.
+   Naming something out of frame ("the black bin" when no bin is in view) makes it
+   retract to rest. `so101_client.py probe` scores wordings live without moving
+   the arm.
+4. **Don't switch prompts mid-carry.** Changing the instruction while the gripper
+   holds something makes it re-plan from scratch and drop the object. Use one
+   full-task prompt.
+5. **Object placement and contrast.** Objects want to be in the open area in front
+   of the arm (the preview draws a `place object here` box), not at its base or the
+   frame edge. A black marker on dark wood is near-invisible to the scene camera;
+   bright, chunky objects work best.
+6. **Per-arm wrist offsets may be needed.** LeRobot's calibration zero is whatever
+   pose you held at calibration time, so `joint_offsets` sometimes needs per-joint
+   corrections beyond the documented v3.0→v2.1 conversion. With the wrist roll
+   wrong by ~78° the policy retracted instead of reaching. Check with
+   `so101_client.py check`, then A/B the offsets with `probe`.
 
 ## Two arms: what to expect
 

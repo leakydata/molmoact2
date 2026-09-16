@@ -78,7 +78,21 @@ class FollowerArm:
                 f"`lerobot-calibrate --robot.type=so101_follower --robot.port={port} "
                 f"--robot.id={calibration_id}` first."
             )
-        self.robot.connect(calibrate=False)
+        # Servos on a sagging supply occasionally miss the connect-time motor
+        # check or a config write; a short retry rides through that.
+        for attempt in range(6):
+            try:
+                self.robot.connect(calibrate=False)
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt == 5:
+                    raise
+                print(f"[{name}] connect attempt {attempt + 1} failed ({e.__class__.__name__}); retrying")
+                try:
+                    self.robot.bus.disconnect(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(1.0)
         if not self.robot.is_calibrated:
             print(f"[{name}] motor calibration differs from {self.robot.calibration_fpath}; "
                   "writing file calibration to the motors")

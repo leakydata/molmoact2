@@ -4,39 +4,50 @@
 # setup. `uv run so101_client.py cameras` lists what's plugged in.
 
 server: http://127.0.0.1:8101     # host_server_so101.py (./run_so101.sh)
-prompt: pick up the red block and put it in the bowl   # default; --prompt overrides
+prompt: pick up the orange collar
 
 exec_hz: 30              # rate joint targets are sent to the servos
 num_steps: 10            # flow-matching solver steps
+execution_mode: commit   # commit = follow each chunk for commit_steps (reaches get executed); ensemble = blend chunks
+commit_steps: 30         # full chunk (1 s); the checkpoint metadata says n_action_steps=30
 ensemble_m: 0.5          # temporal-ensembling decay (1/s); lower = smoother, laggier
 smooth_alpha: 1.0        # extra EMA on the output (1.0 = off; try 0.6 if jittery)
 warmup_predictions: 2    # discard the first N chunks per arm (CUDA-graph capture is slow)
-hold_torque_on_exit: false   # false = arm goes limp on exit (LeRobot default)
+hold_torque_on_exit: true    # true = stays stiff on exit (arm does not drop)
 
 cameras:
   scene:
-    # RealSense via pyrealsense2 (colour only). Omit `serial` to take the first one.
+    # Logitech C922 (easy to reposition). Training views are either straight
+    # down from above or at table height looking across a plain table.
+    type: opencv
+    device: /dev/v4l/by-id/usb-046d_C922_Pro_Stream_Webcam_33DAD1BF-video-index0
+    width: 640
+    height: 480
+    fps: 30
+    white_balance_temperature: 4600
+  realsense:
+    # Previous scene camera; point an arm's `scene_camera` here to switch back.
     type: realsense
     serial: "935322072168"
     width: 640
     height: 480
     fps: 30
-    # To use a plain webcam instead:
-    # type: opencv
-    # device: /dev/v4l/by-id/usb-046d_C922_Pro_Stream_Webcam_33DAD1BF-video-index0
   wrist:
     type: opencv
     # The standard SO-101 wrist cam. Replace with its by-id path once plugged in.
-    device: /dev/v4l/by-id/REPLACE-ME-video-index0
+    device: /dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0
     width: 640
     height: 480
     fps: 30
     flip: "180"          # v | h | 180 | none. Match how the camera is mounted.
     white_balance_temperature: 4600   # pin WB (drift hurts the policy); remove for auto
+    # The wrist cam looks down at a dark desk in the arm's own shadow; without
+    # these it comes out nearly black under room light (tuned to ~90 mean).
+    v4l2_controls: {gain: 20, brightness: 10, gamma: 120, contrast: 32, backlight_compensation: 20}
 
 arms:
   - name: left
-    port: /dev/ttyACM0                 # `lerobot-find-port`
+    port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE6082317-if00
     calibration_id: left_follower      # ~/.cache/huggingface/lerobot/calibration/robots/so_follower/<id>.json
     scene_camera: scene
     wrist_camera: wrist
@@ -45,10 +56,14 @@ arms:
     # LeRobot v3.0 calibration -> MolmoAct2 (v2.1) joint convention.
     # model = signs * arm + offsets. Verify with `so101_client.py check`.
     joint_signs:   [1, -1, 1, 1, 1, 1]
-    joint_offsets: [0, 90, 90, 0, 0, 0]
+    # LeRobot v3.0 -> v2.1 plus two per-arm wrist corrections for THIS calibration:
+    #   wrist_flex -23, wrist_roll +78 (gripper reads -82 when square). With the
+    #   plain defaults the model retracted to rest; with these it reached and grasped.
+    joint_offsets: [0, 90, 90, -23, 78, 0]
+    prompt: pick up the orange collar
 
     # Safety. Limits are in the arm's own (LeRobot) degrees; null = no limit.
-    max_step_deg: 5.0                  # per 1/exec_hz tick, whole-vector scaled
-    max_chunk_jump_deg: 30.0           # drop chunks whose first action is this far from the current pose
+    max_step_deg: 15.0                 # per 1/exec_hz tick, whole-vector scaled
+    max_chunk_jump_deg: 60.0           # joint conventions are validated; let big reaches through
     joint_min: [null, null, null, null, null, null]
     joint_max: [null, null, null, null, null, null]

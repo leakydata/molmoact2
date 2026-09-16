@@ -7,7 +7,7 @@ requires-python = ">=3.12,<3.13"
 # huggingface-hub>=1.0 while the server's transformers 4.57 needs <1.0.
 dependencies = [
     "lerobot[feetech]>=0.5.1,<0.7",
-    # Direct deps only so the CPU-index source below applies to them.
+    # Direct deps only so the CUDA-index source below applies to them.
     "torch>=2.7,<2.12",
     "torchvision>=0.22,<0.27",
     "pyrealsense2>=2.55.1.6486,<2.57",
@@ -21,12 +21,13 @@ dependencies = [
 [tool.uv]
 package = false
 
-# The client never runs the model; CPU wheels keep LeRobot's torch dep small.
+# The client uses CUDA-12.8 PyTorch wheels (CUDA-enabled builds are required
+# everywhere), matching the repo-root server environment's index.
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
