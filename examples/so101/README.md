@@ -157,6 +157,18 @@ and "plans 2° and parks". What decided it, in order of impact:
    camera fixed it. If the policy "goes dumb" after someone bumps a camera,
    check the camera geometry before touching anything else.
 
+   Confirmed live, same prompt and settings back to back on one rig: a D435
+   mounted high and angled down moved the gripper on 64% of plans (mean 7.9°),
+   a webcam at table height on 17% (mean 2.5°). With the D435 the arm grasped
+   the marker, carried it to the mug and released — it missed the mug, but that
+   is a precision failure rather than the "approach forever with open jaws"
+   failure the low camera produces. Scene brightness matters nearly as much:
+   the same rig in a dark room scored 17% where daylight scored 64%.
+
+   So: give the robot a dedicated, well-lit, uncluttered patch of table, with
+   the scene camera above it looking down. That is worth more than any amount
+   of prompt or client tuning.
+
    A dark or colour-cast scene image costs almost as much. Pin the RealSense's
    white balance and exposure (`white_balance:`, `exposure:`, `gain:` in the
    camera config) — its auto WB swings hard blue under mixed desk light, and
